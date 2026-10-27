@@ -569,5 +569,49 @@ class Integration(unittest.TestCase):
         self.assertEqual(from_readme.strip().splitlines(), from_help)
 
 
+class FormalRunner(unittest.TestCase):
+    def test_portable_launchers_and_failure_propagation(self):
+        # Exercise runner orchestration; stubs do not verify the TLA+ models.
+        import shutil
+        SCRATCH.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="formal-runner-", dir=SCRATCH) as tmp:
+            root = pathlib.Path(tmp)
+            formal = root / "formal"
+            formal.mkdir()
+            shutil.copyfile(ROOT / "formal/run.sh", formal / "run.sh")
+            tools = root / "tools with spaces"
+            tools.mkdir()
+            sany = tools / "sany"
+            sany.write_text("#!/bin/sh\nexit 0\n")
+            sany.chmod(0o755)
+            tlc = tools / "tlc"
+            tlc.write_text("""#!/bin/sh
+case "$*" in
+  *BadEvidence.cfg*) echo 'Invariant EvidenceSafe is violated.'; exit 12;;
+  *BadCommitRetry.cfg*) echo 'Invariant CommitOnce is violated.'; echo '<Crash line'; exit 12;;
+  *) echo 'Model checking completed. No error has been found.';;
+esac
+""")
+            tlc.chmod(0o755)
+            env = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
+            env.pop("SANY", None)
+            env.pop("TLC", None)
+            def run():
+                return subprocess.run(["/bin/sh", str(formal / "run.sh")],
+                                      env=env, text=True, capture_output=True)
+            result = run()
+            self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+            env.update(SANY=str(sany), TLC=str(tlc))
+            self.assertEqual(run().returncode, 0)
+            env["SANY"] = str(tools / "missing")
+            self.assertNotEqual(run().returncode, 0)
+            env["SANY"] = str(sany)
+            sany.write_text("#!/bin/sh\necho 'Semantic errors:'\nexit 0\n")
+            self.assertNotEqual(run().returncode, 0)
+            sany.write_text("#!/bin/sh\nexit 0\n")
+            tlc.write_text("#!/bin/sh\necho 'Model checking completed. No error has been found.'\n")
+            self.assertNotEqual(run().returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -136,3 +136,24 @@
   matching passing evidence. The regression test passed after rebuilding.
   Final `./bootstrap.sh` passed ASDF assertions and the full integration
   suite passed 34 tests in 103.424s. Formal results are in `formal/README.md`.
+
+## 8. MIT source-preview preparation (2026-10-28)
+
+- Added project MIT LICENSE and explicit pi-autoresearch mechanism credit in
+  README and dependency notes. THIRD_PARTY_NOTICES.md retains the upstream
+  MIT text from the pinned reference revision.
+- Replaced local build instructions with checkout-relative setup and stated
+  exact SBCL, Git, zstd, Python and platform prerequisites. Historical log
+  paths remain historical evidence, not installation requirements.
+- Formal runner resolves sany/tlc via PATH or SANY/TLC executable overrides.
+  The added regression exercises PATH discovery, executable paths with spaces,
+  missing tools, semantic-error detection and missing negative counterexamples
+  using stubs; it does not check model correctness.
+- Fresh bootstrap passed before preparation. Final full integration suite:
+  35 tests passed in 78.425 seconds, including README/help consistency and
+  the new formal-runner test. Shell syntax and diff checks passed.
+- Real TLA+ SANY parsed Workflow and Recovery again. Recovery TLC completed
+  with no errors: 32 generated / 27 distinct states, queue empty. The complete
+  workflow safety search and negative models were not rerun; prior section
+  records their existing finite-state results. Model files are unchanged.
+- This preparation does not change repository visibility or publish binaries.

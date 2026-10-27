@@ -3,7 +3,7 @@
 The six-command macOS arm64 CLI is implemented. Milestones 1-4 pass; milestone
 5 passes on macOS, but Linux remains unverified. `./bootstrap.sh` runs ASDF
 assertions and builds `build/hillclimber`; `python3 integration.py` passes
-33 disposable-repository tests. See `VERIFICATION.md` for exact gates,
+34 disposable-repository tests plus one portable formal-runner test. See `VERIFICATION.md` for exact gates,
 artifact fingerprint and retained quickstart evidence.
 
 Independent fresh-agent help-only onboarding passed: baseline 10, best 5, one

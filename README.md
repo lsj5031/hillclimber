@@ -6,10 +6,16 @@ Node runtime. Start with `build/hillclimber --help`: its quickstart is complete
 and executable, including one-time setup and a keep/discard cycle. Every
 command also has `--help`.
 
-Build on the tested macOS arm64 host:
+Experimental source preview, tested on macOS arm64. Build prerequisites:
+SBCL **2.6.9** on PATH, Git at /usr/bin/git, /bin/sh, and Homebrew zstd.
+Python 3 is needed for integration tests. First bootstrap needs network access
+for pinned Lisp sources. Linux and other architectures remain unverified.
+
+Build from a checkout:
 
 ```sh
-cd /Users/liu/Code/hillclimber
+git clone https://github.com/lsj5031/hillclimber.git
+cd hillclimber
 ./bootstrap.sh
 python3 integration.py
 ```
@@ -20,6 +26,10 @@ present, `sbcl --no-userinit --no-sysinit --non-interactive --load build.lisp`
 works offline. The native executable is `build/hillclimber`. Runtime requires
 Git and `/bin/sh` plus the macOS image's Homebrew `libzstd.1.dylib`, but no
 Lisp initialization or dependency fetch.
+
+Add the checkout's build directory to PATH or invoke the executable by its
+absolute path. From the checkout root: export PATH="$PWD/build:$PATH".
+The demo requires your usual Git user.name and user.email configuration.
 
 The executable's quickstart (run in a new disposable or dedicated worktree):
 
@@ -56,3 +66,12 @@ Linux support. Evaluator protection is cooperative, not a sandbox. A shell
 script can deliberately write outside scope or detach a descendant; only
 ordinary process-group descendants are cleaned up. Journal fsync and tested
 process-crash recovery do not guarantee arbitrary power-loss durability.
+
+## License and acknowledgments
+
+[MIT](LICENSE). The experiment/measure/keep-or-discard mechanism comes from
+[pi-autoresearch](https://github.com/davebcn87/pi-autoresearch), by Tobi Lütke
+and David Cortés. Hillclimber adapts that mechanism into a standalone CLI
+that any human or agent with shell access can drive. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the upstream MIT notice
+and [DEPENDENCIES.md](DEPENDENCIES.md) for dependency licenses.

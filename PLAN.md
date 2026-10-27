@@ -1,6 +1,8 @@
 # Universal autoresearch CLI — SBCL implementation plan
 
-Status: bare-bones CLI scope agreed; implementation not started. Dashboard is unnecessary for this project.
+Historical implementation plan. The CLI is now implemented; README.md and
+STATUS.md describe current release scope. Platform targets below are planning
+goals, not support claims.
 
 ## Goal
 

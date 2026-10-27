@@ -7,7 +7,12 @@ Logs, state fingerprints and counterexample traces go to ignored
 interrupted Java child cannot corrupt another run's metadata. The script
 prints its log directory. It requires the pinned TLA+ 1.7.4 launchers,
 Java 21 and `rg`; it caps the JVM at 2 GiB, TLC at two workers, and uses
-disk-backed fingerprint/state queues. A passing run checks the **model**,
+disk-backed fingerprint/state queues. Put sany and tlc launchers on PATH,
+or set SANY and TLC to their executable paths (paths containing spaces work).
+The launchers must select the official TLA+ 1.7.4 jar and Java 21. TLA+ is
+optional for building and using the CLI. See the official
+[TLA+ release](https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4) for
+installation; this repository does not install or bundle it. A passing run checks the **model**,
 not the executable. `Workflow.cfg` checks safety without fairness;
 `Recovery.cfg` checks liveness only under the conditions below.
 
@@ -105,12 +110,12 @@ The exact formal run is `sh formal/run.sh` at the checkout root; from
 export JAVA_TOOL_OPTIONS=-Xmx2048m
 mkdir -p ../scratch/formal
 out=$(mktemp -d ../scratch/formal/run.XXXXXXXX)
-/Users/liu/.local/bin/sany Workflow.tla
-/Users/liu/.local/bin/sany Recovery.tla
-/Users/liu/.local/bin/tlc -workers 2 -fpmem 0.1 -metadir "$out/Workflow" -config Workflow.cfg Workflow.tla
-/Users/liu/.local/bin/tlc -workers 2 -fpmem 0.1 -metadir "$out/Recovery" -config Recovery.cfg Recovery.tla
-/Users/liu/.local/bin/tlc -workers 2 -fpmem 0.1 -metadir "$out/BadEvidence" -config BadEvidence.cfg Workflow.tla
-/Users/liu/.local/bin/tlc -workers 2 -fpmem 0.1 -metadir "$out/BadCommitRetry" -config BadCommitRetry.cfg Workflow.tla
+sany Workflow.tla
+sany Recovery.tla
+tlc -workers 2 -fpmem 0.1 -metadir "$out/Workflow" -config Workflow.cfg Workflow.tla
+tlc -workers 2 -fpmem 0.1 -metadir "$out/Recovery" -config Recovery.cfg Recovery.tla
+tlc -workers 2 -fpmem 0.1 -metadir "$out/BadEvidence" -config BadEvidence.cfg Workflow.tla
+tlc -workers 2 -fpmem 0.1 -metadir "$out/BadCommitRetry" -config BadCommitRetry.cfg Workflow.tla
 ```
 
 The pinned official 1.7.4 jar has SHA-256

@@ -20,8 +20,10 @@ The macOS binary also dynamically links Homebrew's `libzstd.1.dylib` and
 macOS `libSystem.B.dylib`, as verified with `otool -L`; it is not a single
 portable binary for Macs lacking the matching zstd library.
 The executable contains the pinned Lisp library code; retain the dependency
-license texts alongside redistributed binaries. The behavior is a fresh
-implementation, not a translation of upstream TypeScript; workflow inspiration:
-`davebcn87/pi-autoresearch` at
-`04b8a50dac7efe80ffc91648bd00ed9b022e24c2` (MIT). No upstream assets
-are copied.
+license texts alongside redistributed binaries.
+
+Hillclimber adapts the experiment/measure/keep-or-discard mechanism from
+[davebcn87/pi-autoresearch](https://github.com/davebcn87/pi-autoresearch) at
+04b8a50dac7efe80ffc91648bd00ed9b022e24c2 (MIT). See THIRD_PARTY_NOTICES.md
+for attribution and the upstream license notice. Project code is licensed
+under LICENSE. This source preview includes no prebuilt binary.
