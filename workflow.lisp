@@ -269,7 +269,8 @@
                 "Run again before keep, or discard."))
         (valid-keep session st attempt)
         (unless entries (fail "no-changes" "No candidate changes to keep." "Edit the scope and run again.")))
-      (when (and (hash-table-p attempt) (not (same-json source (field attempt "source"))))
+      (when (and (hash-table-p attempt) (gethash "source" attempt)
+                 (not (same-json source (field attempt "source"))))
         (fail "source-drift" "Source changed since measurement."
               "Measure current source again, or manually resolve drift before discard."))
       (let ((intent (obj "type" "intent" "id" (field pending "id") "action" action

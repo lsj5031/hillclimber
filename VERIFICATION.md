@@ -111,3 +111,28 @@
 - Initial implementation worker exited 1 when its attempt to remove diagnostic
   scratch repositories was denied by its tool policy. Those fixtures were
   preserved; implementation and onboarding did not require their deletion.
+
+## 7. TLA+ finite-state verification (2026-10-27)
+
+- `formal/Workflow.tla` models the journal, two locked writers, attempt
+  reservation, score/source/evaluator evidence, Git commit, discard backup,
+  process crash and idempotent recovery. `formal/Recovery.tla` separately
+  checks eventual recovery **only** under explicit no-further-crash/no-drift/
+  no-hook-failure and weak-fairness assumptions. See `formal/README.md` for
+  source mapping, boundaries, exact commands and final TLC state counts.
+- `sh formal/run.sh` runs SANY, complete bounded safety and fairness checks,
+  and two negative controls which must yield counterexamples for removing
+  evidence validation or permitting a post-crash duplicate commit. TLC checks
+  the model and finite configuration, not a refinement proof about the CLI;
+  power loss, hostile writers, malformed journal bytes and external Git drift
+  are outside this abstraction.
+- In this isolated worktree `./bootstrap.sh` passed its existing ASDF
+  assertions. Before the implementation fix, `python3 integration.py` passed
+  all 33 existing tests (93.883s). A new isolated candidate test then
+  reproduced a real defect: after an interrupted attempt consumed the last
+  budget slot, `recover` wrote an attempt without a source fingerprint and
+  `decide discard` rejected it as source drift. The minimal fix skips the
+  source comparison only when no source was recorded; keep still requires
+  matching passing evidence. The regression test passed after rebuilding.
+  Final `./bootstrap.sh` passed ASDF assertions and the full integration
+  suite passed 34 tests in 103.424s. Formal results are in `formal/README.md`.

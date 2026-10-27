@@ -209,6 +209,20 @@ class Integration(unittest.TestCase):
         self.cli("run", "--baseline")
         self.assertEqual(self.cli("status")["remaining"], 1)
 
+    def test_discard_after_interrupted_attempt_exhausts_budget(self):
+        self.init(budget=2)
+        self.cli("run", "--baseline")
+        self.begin()
+        self.crash("after-run-start", "run")
+        self.cli("recover")
+        self.assertEqual(self.cli("status")["remaining"], 0)
+        self.assertEqual(self.cli("decide", "keep", "--reason", "No score",
+                                  expected=3)["code"], "source-drift")
+        self.cli("decide", "discard", "--reason", "Interrupted attempt")
+        self.assertIsNone(self.cli("status")["candidate"])
+        self.assertEqual((self.repo / "src/value").read_text(), "slow\n")
+        self.assertEqual(len(self.git("log", "--format=%s").splitlines()), 1)
+
     def _check_crash_keep(self, point):
         self.init()
         self.cli("run", "--baseline")
