@@ -35,12 +35,16 @@ Use status to resume; recover after an interrupted run or decision.
 "Scripts run with /bin/sh from the project root. Print METRIC name=finite_decimal
 (e.g. METRIC elapsed_ms=-1.2e3). Last duplicate wins. Names: letters,
 digits, _, ., -, µ, μ. Units are labels, never conversion factors.
+Decimal scores must be representable as finite double floats; nonzero values
+that underflow to zero are rejected.
 Only --scope paths may change. Benchmark, checks and --input paths are protected.
 Do not edit between measurement and keep or manually commit/reset while pending.
 hillclimber owns keep/discard, not your scripts. State/logs: .auto/ in project.
 Use status --context --json to discover state; never guess or reinitialize.
 --project PATH (default cwd) chooses the exact worktree root. --json returns one
 versioned object on stdout, including help/errors; no interactive prompts.
+Malformed option tokens fail first; otherwise --help wins over --version and
+both precede repository/state checks. Help and version never mutate files.
 Exit: 0 success/help; 2 arguments; 3 precondition; 4 failed measurement;
 5 Git/storage/internal; 130 interrupt. See COMMAND --help for exact options.
 ")
@@ -78,12 +82,15 @@ Exit: 0 including discard, 2 invalid, 3 precondition, 5 Git/storage.")
    (cons "status" "status [--history N] [--context]
 Read-only committed journal replay: baseline/best, accepted HEAD, pending candidate,
 budget, latest result and next action. History defaults to 0; N <= 100.
-Works across invocations; invalid journal blocks status and mutation.
+Works across invocations. Incomplete final journal bytes are diagnosed while
+status reads the complete prefix; recover backs up and trims that fragment.
+Invalid complete records block status and mutation.
 Example: hillclimber status --context --json
 Exit: 0, 2 invalid, 3 no session, 5 corruption.")
    (cons "recover" "recover
 Requires existing session. Reconciles an interrupted execution or decision.
 An incomplete run is marked failed with missing score; budget stays consumed.
+Truncated final journal bytes are copied to recovery before repair.
 Decision intent is compared against HEAD and recorded source, then completed;
 ambiguous drift fails closed. Repeating recover after resolution is harmless.
 Example: hillclimber recover
@@ -133,7 +140,13 @@ Exit: 0, 3 precondition/drift, 5 ambiguous Git/storage.")))
         (fail "arguments" (format nil "~a is not an option for ~a." (car o) command)
               (format nil "See hillclimber ~a --help." command) 2)))))
 (defun status-view (root options)
-  (let* ((session (load-session root)) (st (state root))
+  (let* ((session (load-session root)) (st (state root t))
+         (bytes (journal-bytes root))
+         (truncated (< (1+ (journal-prefix bytes)) (length bytes)))
+         (actual (git-head root))
+         (drift (and (stringp (field st "accepted"))
+                     (not (equal actual (field st "accepted")))
+                     (eq (field st "intent") :null)))
          (pending (field st "pending")) (attempt (field st "attempt"))
          (n (if (option options "--history")
                 (int-option (option options "--history") "--history" 0) 0)))
@@ -142,11 +155,15 @@ Exit: 0, 3 precondition/drift, 5 ambiguous Git/storage.")))
                        "metric" (field session "metric") "direction" (field session "direction")
                        "unit" (field session "unit") "baseline" (field st "baseline")
                        "best" (field st "best") "accepted" (field st "accepted")
+                       "actual_head" actual "head_drift" (bool drift)
                        "candidate" pending "last_attempt" attempt
                        "executions" (field st "runs")
                        "candidates" (field st "candidates")
                        "remaining" (- (field session "budget") (field st "runs"))
+                       "journal_warning" (if truncated "Incomplete final record; run recover." :null)
                        "next" (cond
+                                (truncated "recover")
+                                (drift "resolve HEAD drift manually")
                                 ((not (eq (field st "intent") :null)) "recover")
                                 ((and (hash-table-p attempt)
                                       (equal (field attempt "type") "attempt-start")) "recover")
@@ -178,7 +195,9 @@ Exit: 0, 3 precondition/drift, 5 ambiguous Git/storage.")))
           (initialize root options)
           (if (equal command "status")
               (status-view root options)
-              (with-session-lock
+              (progn
+                (load-session root)
+                (with-session-lock
                   root (lambda ()
                          (cond
                            ((equal command "begin")
@@ -189,16 +208,28 @@ Exit: 0, 3 precondition/drift, 5 ambiguous Git/storage.")))
                                      (int-option (option options "--timeout" "120") "--timeout")))
                            ((equal command "decide")
                             (decision root (second positionals) (option options "--reason")))
-                           ((equal command "recover") (recover-session root))))))))))
+                           ((equal command "recover") (recover-session root)))))))))))
 (defun response (kind payload)
   (obj "v" 1 "kind" kind "data" payload))
+(defun print-result (data)
+  (if (gethash "remaining" data)
+      (format t "Session: ~a~%Baseline: ~a  Best: ~a ~a~%Accepted: ~a~%Candidate: ~a~%Executions: ~d  Remaining: ~d~%Next: ~a~%"
+              (field data "name")
+              (field (field data "baseline") "score" "none")
+              (field data "best") (field data "unit")
+              (field data "accepted") (field (field data "candidate") "id" "none")
+              (field data "executions") (field data "remaining") (field data "next"))
+      (loop for key being the hash-keys of data using (hash-value value)
+            do (format t "~a: ~a~%" key
+                       (if (eq value :null) "none" value)))))
 (defun main ()
   (let ((json-mode (member "--json" (uiop:command-line-arguments) :test #'equal))
         (exit-code 0))
-    (handler-bind ((sb-sys:interactive-interrupt
-                     (lambda (e) (declare (ignore e))
-                       (fail "interrupted" "Interrupted; any started execution consumed budget."
-                             "Run recover, then inspect status and logs." 130))))
+    (catch 'user-interrupt
+      (handler-bind ((sb-sys:interactive-interrupt
+                       (lambda (e) (declare (ignore e))
+                         (setf exit-code 130)
+                         (throw 'user-interrupt nil))))
       (handler-case
         (multiple-value-bind (positionals options project j help version)
             (parse-args (uiop:command-line-arguments))
@@ -212,7 +243,9 @@ Exit: 0, 3 precondition/drift, 5 ambiguous Git/storage.")))
             (if json-mode (write-line (json result))
                 (if (equal (field result "kind") "help")
                     (write-line (field (field result "data") "text"))
-                    (format t "~a~%" (json (field result "data")))))))
+                    (if (equal (field result "kind") "result")
+                        (print-result (field result "data"))
+                        (format t "~a~%" (json (field result "data"))))))))
       (cli-error (e)
         (setf exit-code (err-exit e))
         (let ((payload (obj "code" (err-code e) "message" (err-message e) "next" (err-next e))))
@@ -225,6 +258,14 @@ Exit: 0, 3 precondition/drift, 5 ambiguous Git/storage.")))
             (write-line (json (response "error" (obj "code" "internal"
                                                     "message" (princ-to-string e)
                                                     "next" "Inspect the session and run recover if a decision is pending."))))
-            (format *error-output* "internal: ~a~%" e)))))
+            (format *error-output* "internal: ~a~%" e))))))
+    (when (= exit-code 130)
+      (let ((payload (obj "code" "interrupted"
+                          "message" "Interrupted; any started execution consumed budget."
+                          "next" "Run recover, then inspect status and logs.")))
+        (if json-mode
+            (write-line (json (response "error" payload)))
+            (format *error-output* "interrupted: ~a~%Next: ~a~%"
+                    (field payload "message") (field payload "next")))))
     (finish-output) (finish-output *error-output*)
     (sb-ext:exit :code exit-code)))

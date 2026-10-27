@@ -7,6 +7,10 @@ fetch() {
   if [ ! -d ".deps/$name/.git" ]; then
     git clone -q "$url" ".deps/$name"
   fi
+  if [ -n "$(git -C ".deps/$name" status --porcelain)" ]; then
+    echo "Dirty dependency, refusing to change or build it: $name" >&2
+    exit 1
+  fi
   actual=$(git -C ".deps/$name" rev-parse HEAD)
   if [ "$actual" != "$revision" ]; then
     git -C ".deps/$name" checkout -q --detach "$revision"

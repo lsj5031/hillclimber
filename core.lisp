@@ -31,16 +31,36 @@
   (loop for start = 0 then (1+ end)
         for end = (position #\Null string :start start)
         while end collect (subseq string start end)))
+(defun read-bounded (stream limit)
+  (let ((buffer (make-string 4096)) (count 0) (truncated nil))
+    (values
+     (with-output-to-string (output)
+       (loop for n = (read-sequence buffer stream) while (plusp n)
+             do (let ((size (min n (max 0 (- limit count)))))
+                  (write-string buffer output :end size)
+                  (incf count size)
+                  (when (< size n) (setf truncated t)))))
+     truncated)))
 (defun run-cmd (program args &key directory)
-  (let* ((p (sb-ext:run-program program args :search nil :wait t
+  (let* ((p (sb-ext:run-program program args :search nil :wait nil
                                  :input nil :output :stream :error :stream
                                  :external-format :utf-8 :directory directory))
-         (out (uiop:slurp-stream-string (sb-ext:process-output p)))
-         (err (uiop:slurp-stream-string (sb-ext:process-error p))))
-    (values out (sb-ext:process-exit-code p) err)))
+         (stdout (sb-thread:make-thread
+                  (lambda () (multiple-value-list
+                              (read-bounded (sb-ext:process-output p) (* 8 1024 1024))))))
+         (stderr (sb-thread:make-thread
+                  (lambda () (multiple-value-list
+                              (read-bounded (sb-ext:process-error p) 65536))))))
+    (sb-ext:process-wait p)
+    (destructuring-bind (out out-cut) (sb-thread:join-thread stdout)
+      (destructuring-bind (err err-cut) (sb-thread:join-thread stderr)
+        (when (or out-cut err-cut)
+          (fail "git-output-limit" "Git output exceeded safe capture limits."
+                "Reduce the worktree or inspect verbose Git hooks." 5))
+        (values out (sb-ext:process-exit-code p) err)))))
 (defun git (root &rest args)
   (multiple-value-bind (out status err)
-      (run-cmd "/usr/bin/git" (append (list "-C" root) args))
+      (run-cmd "/usr/bin/git" (append (list "-C" root "--literal-pathspecs") args))
     (unless (zerop status)
       (fail "git" (format nil "git ~{~a ~} failed: ~a" args err)
             "Inspect Git status and hooks; run hillclimber recover if a decision was interrupted." 5))
@@ -65,6 +85,7 @@
   (and (stringp p) (> (length p) 0)
        (not (char= (char p 0) #\/))
        (not (find #\Null p))
+       (not (member "." (uiop:split-string p :separator "/") :test #'equal))
        (not (member ".." (uiop:split-string p :separator "/") :test #'equal))
        (not (member "" (uiop:split-string p :separator "/") :test #'equal))
        (not (member (car (uiop:split-string p :separator "/")) '(".git" ".auto") :test #'equal))))
@@ -108,7 +129,10 @@
 (defun fingerprint (root entries)
   (arr (mapcar (lambda (e)
                  (let* ((name (cdr e)) (file (path root name))
-                        (exists (probe-file file)))
+                        (exists (ignore-errors (sb-posix:lstat file))))
+                   (when (and (equal (car e) "??") (not exists))
+                     (fail "source-drift" "A new file disappeared during fingerprinting."
+                           "Run again when edits are stable."))
                    (obj "path" name "status" (car e) "mode" (if exists (file-mode file) "deleted")
                         "hash" (if exists (hash-file file) :null))))
                entries)))
@@ -121,6 +145,12 @@
                               "Restore it or initialize a new session."))
                       (obj "path" name "hash" (hash-file file) "mode" (file-mode file))))
             (field session "protected"))))
+(defun inside-project (root file)
+  (let ((real (namestring (truename (path root file)))))
+    (unless (and (<= (length root) (length real))
+                 (string= root real :end2 (length root)))
+      (fail "path-escape" (format nil "Path resolves outside project: ~a" file)
+            "Use only project-owned regular paths." 2))))
 (defun validate-identity (root session)
   (unless (and (equal root (field session "root"))
                (equal (trim (git root "rev-parse" "--git-dir"))
@@ -145,6 +175,11 @@
 (defun sync-stream (stream)
   (finish-output stream)
   (sb-posix:fsync (sb-sys:fd-stream-fd stream)))
+(defun sync-directory (directory)
+  (let ((fd (sb-posix:open (namestring (uiop:ensure-directory-pathname directory))
+                           sb-posix:o-rdonly 0)))
+    (unwind-protect (sb-posix:fsync fd)
+      (sb-posix:close fd))))
 (defun write-json-file (name value)
   (with-open-file (f name :direction :output :if-exists :error :external-format :utf-8)
     (write-line (json value) f) (sync-stream f)))
@@ -154,28 +189,42 @@
                                            :external-format :utf-8)
     (write-line (json event) f) (sync-stream f))
   event)
-(defun journal (root)
+(defun journal-bytes (root)
   (unless (probe-file (events-file root))
     (fail "journal-missing" "Missing events journal." "Restore session events from backup." 5))
-  (let ((events nil))
-    (with-open-file (f (events-file root) :direction :input :external-format :utf-8)
-      (loop for line = (read-line f nil nil) while line
-            do (handler-case
-                   (let ((e (parse-json line)))
-                     (unless (and (hash-table-p e) (= (field e "v" -1) 1)
-                                  (member (field e "type")
-                                          '("baseline" "begin" "attempt-start" "attempt"
-                                            "intent" "cancel-intent" "applied" "resolved") :test #'equal))
-                       (error "invalid event"))
-                     (push e events))
-                 (error () (fail "journal-corrupt"
-                                 "Journal has an invalid or truncated record; mutation is blocked."
-                                 "Back up events.jsonl and repair only after comparing its original bytes." 5)))))
+  (with-open-file (f (events-file root) :element-type '(unsigned-byte 8))
+    (let ((buf (make-array (file-length f) :element-type '(unsigned-byte 8))))
+      (read-sequence buf f) buf)))
+(defun journal-prefix (bytes)
+  (or (position 10 bytes :from-end t) -1))
+(defun journal (root &optional allow-tail)
+  (let* ((bytes (journal-bytes root)) (end (1+ (journal-prefix bytes)))
+         (events nil))
+    (when (and (< end (length bytes)) (not allow-tail))
+      (fail "journal-truncated" "Journal ends in an incomplete record."
+            "Run recover; it preserves the original bytes before trimming the final fragment." 5))
+    (loop for start = 0 then (1+ newline)
+          for newline = (position 10 bytes :start start :end end)
+          while newline do
+            (handler-case
+                (let ((e (parse-json
+                          (sb-ext:octets-to-string bytes :start start :end newline
+                                                   :external-format :utf-8))))
+                  (unless (and (hash-table-p e) (= (field e "v" -1) 1)
+                               (member (field e "type")
+                                       '("baseline" "begin" "attempt-start" "attempt" "aggregate"
+                                         "intent" "cancel-intent" "applied" "resolved")
+                                       :test #'equal))
+                    (error "invalid event"))
+                  (push e events))
+              (error () (fail "journal-corrupt" "Journal has an invalid complete record."
+                              "Preserve its bytes and restore a trusted backup; mutation is blocked." 5))))
     (nreverse events)))
-(defun state (root)
+(defun state (root &optional allow-tail)
   (let ((baseline nil) (best nil) (accepted nil) (pending nil)
-        (attempt nil) (intent nil) (applied nil) (runs 0) (candidates 0) (history nil))
-    (dolist (e (journal root))
+        (attempt nil) (intent nil) (applied nil) (runs 0) (candidates 0)
+        (decisions 0) (history nil))
+    (dolist (e (journal root allow-tail))
       (let ((type (field e "type")))
         (cond
           ((equal type "baseline")
@@ -184,8 +233,9 @@
           ((equal type "begin") (setf pending e attempt nil intent nil applied nil)
            (incf candidates))
           ((equal type "attempt-start") (incf runs) (setf attempt e))
-          ((equal type "attempt") (setf attempt e) (push e history))
-          ((equal type "intent") (setf intent e))
+          ((member type '("attempt" "aggregate") :test #'equal)
+           (setf attempt e) (push e history))
+          ((equal type "intent") (setf intent e) (incf decisions))
           ((equal type "cancel-intent") (setf intent nil))
           ((equal type "applied") (setf applied e))
           ((equal type "resolved")
@@ -196,6 +246,7 @@
          "accepted" (or accepted :null) "pending" (or pending :null)
          "attempt" (or attempt :null) "intent" (or intent :null)
          "applied" (or applied :null) "runs" runs "candidates" candidates
+         "decisions" decisions
          "history" (arr (nreverse history)))))
 (defun real-field (o key) (let ((x (field o key))) (and (numberp x) x)))
 (defun with-session-lock (root thunk)

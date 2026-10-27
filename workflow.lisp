@@ -13,13 +13,19 @@
   value)
 (defun list-option (options key) (loop for (k . v) in options when (equal k key) collect v))
 (defun option (options key &optional default) (or (cdr (assoc key options :test #'equal)) default))
-(defun unique-id (n) (format nil "~6,'0d" n))
+(defun unique-id (n prefix) (format nil "~a~6,'0d" prefix n))
 (defun timestamp () (get-universal-time))
 (defun ensure-regular (root name)
   (unless (and (safe-relative name) (probe-file (path root name)))
     (fail "arguments" (format nil "Missing or unsafe path: ~a" name)
           "Use a regular file inside the worktree." 2))
-  (file-mode (path root name)))
+  (file-mode (path root name))
+  (multiple-value-bind (output status)
+      (run-cmd "/usr/bin/git" (list "-C" root "--literal-pathspecs"
+                                    "ls-files" "-z" "--error-unmatch" "--" name))
+    (unless (and (zerop status) (member name (nul-list output) :test #'equal))
+      (fail "untracked-evaluator" (format nil "Evaluator input must be tracked: ~a" name)
+            "Commit the benchmark, checks and declared inputs before init." 2))))
 (defun create-template (source dest fallback)
   (unless (probe-file dest)
     (with-open-file (f dest :direction :output :if-exists :error :external-format :utf-8)
@@ -30,6 +36,12 @@
     (fail "session-exists" ".auto already exists; refusing to overwrite or adopt it."
           "Run status --context for this worktree or use a fresh dedicated worktree."))
   (clean-required root)
+  (multiple-value-bind (output status)
+      (run-cmd "/usr/bin/git" (list "-C" root "rev-parse" "--verify" "HEAD"))
+    (declare (ignore output))
+    (unless (zerop status)
+      (fail "unborn-head" "Initial commit is required before init."
+            "Commit initial source and evaluator files, then run init.")))
   (let* ((scope (list-option options "--scope"))
          (inputs (list-option options "--input"))
          (benchmark (option options "--benchmark"))
@@ -50,10 +62,12 @@
       (unless (and (safe-relative s) (probe-file (path root s)))
         (fail "arguments" (format nil "Scope must exist and stay inside the project: ~a" s)
               "Create scope directory or file before init." 2))
+      (inside-project root s)
       (when (or (equal s ".auto") (equal s ".git"))
         (fail "arguments" "Reserved scope." "Select source paths only." 2)))
     (dolist (p (remove nil (append (list benchmark checks) inputs)))
       (ensure-regular root p)
+      (inside-project root p)
       (when (within p scope)
         (fail "protected-scope" (format nil "Evaluator input is inside editable scope: ~a" p)
               "Separate benchmark, checks, data and configuration from editable source." 2)))
@@ -61,6 +75,9 @@
            (excluded (if (uiop:absolute-pathname-p exclude-name)
                          exclude-name (path root exclude-name)))
            (auto (path root ".auto/")))
+      (handler-case (sb-posix:mkdir auto #o700)
+        (error () (fail "session-exists" ".auto was created by another writer."
+                        "Inspect that session; do not overwrite it.")))
       (ensure-directories-exist (path root ".auto/runs/"))
       (ensure-directories-exist (path root ".auto/recovery/"))
       (unless (and (probe-file excluded)
@@ -81,6 +98,11 @@
         (write-json-file (session-file root) session)
         (with-open-file (f (events-file root) :direction :output :if-exists :error)
           (sync-stream f))
+        (with-open-file (f (path root ".auto/session.lock") :direction :output
+                                                              :if-exists :error)
+          (sync-stream f))
+        (sync-directory auto)
+        (sync-directory root)
         (obj "session" name "project" root "next" "run --baseline")))))
 
 (defun verify-session (root session state &key (protected t))
@@ -94,15 +116,23 @@
 (defun score-samples (results)
   (let ((scores (mapcar (lambda (e) (real-field e "score")) results)))
     (when (and (= (length scores) (length results)) (every #'numberp scores))
-      (let* ((names (loop for k being the hash-keys of (field (first results) "metrics") collect k))
-             (aggregates (obj)))
+      (let* ((names (remove-duplicates
+                     (loop for r in results append
+                       (loop for k being the hash-keys of (field r "metrics") collect k))
+                     :test #'equal))
+             (aggregates (obj)) (missing nil))
         (dolist (name names)
           (let ((values (mapcar (lambda (r) (real-field (field r "metrics") name)) results)))
-            (when (every #'numberp values)
-              (setf (gethash name aggregates) (median values)))))
+            (if (every #'numberp values)
+                (setf (gethash name aggregates) (median values))
+                (push name missing))))
         (values (median scores)
                 (median (mapcar (lambda (s) (abs (- s (median scores)))) scores))
-                aggregates)))))
+                aggregates (arr (nreverse missing)))))))
+(defun test-crash (point)
+  ;; Deterministic process-crash injection for disposable integration fixtures.
+  (when (equal (uiop:getenv "HILLCLIMBER_TEST_CRASH") point)
+    (sb-posix:_exit 86)))
 (defun measure (root baseline repeat timeout)
   (let* ((session (load-session root)) (state (state root))
          (pending (field state "pending")) (budget (field session "budget")))
@@ -125,13 +155,15 @@
            (source (fingerprint root entries))
            (results nil))
       (dotimes (j repeat)
-        (let* ((now (state root)) (id (unique-id (1+ (field now "runs"))))
+        (let* ((now (state root)) (id (unique-id (1+ (field now "runs")) "r-"))
                (run-dir (path root (format nil ".auto/runs/~a/" id)))
                (start-event (obj "type" "attempt-start" "id" id
                                  "candidate" (if baseline :null (field pending "id"))
                                  "at" (timestamp))))
           (ensure-directories-exist run-dir)
+          (sync-directory (path root ".auto/runs/"))
           (append-event root start-event)
+          (test-crash "after-run-start")
           (let* ((benchmark (execute-script root ".auto/measure.sh" run-dir "benchmark" timeout))
                  (stdout (log-text (path run-dir "benchmark.stdout")))
                  (parsed nil) (duplicates #()) (problem nil) (checks :null))
@@ -147,6 +179,7 @@
             (let* ((stable (same-json (protected-fingerprint root session)
                                        (field session "fingerprint")))
                    (pass (and (not problem) stable
+                              (eq (field (field benchmark "stdout") "truncated") yason:false)
                               (numberp (field benchmark "exit")) (zerop (field benchmark "exit"))
                               (eq (field benchmark "timeout") yason:false)
                               (real-field parsed (field session "metric"))
@@ -163,14 +196,15 @@
               (append-event root entry) (push entry results)
               (unless pass (return))))))
       (setf results (nreverse results))
-      (multiple-value-bind (score mad aggregates)
+      (multiple-value-bind (score mad aggregates missing)
           (score-samples results)
-        (declare (ignore aggregates))
         (if baseline
             (if score
                 (progn
                   (append-event root (obj "type" "baseline" "head" (git-head root)
-                                          "score" score "mad" mad "samples" (arr (mapcar (lambda (x) (field x "score")) results))
+                                          "score" score "mad" mad "metrics" aggregates
+                                          "secondary_missing" missing
+                                          "samples" (arr (mapcar (lambda (x) (field x "score")) results))
                                           "count" 0 "at" (timestamp)))
                   (obj "score" score "mad" mad "samples" (length results) "next" "begin --hypothesis"))
                 (fail "measurement-failed" "Baseline benchmark or checks failed; score is missing."
@@ -178,11 +212,11 @@
             (progn
               ;; Last attempt carries aggregate evidence, not a fabricated score.
               (when score
-                (append-event root (obj "type" "attempt" "id" (field (car (last results)) "id")
+                (append-event root (obj "type" "aggregate" "id" (field (car (last results)) "id")
                                         "candidate" (field pending "id") "source" source
                                         "score" score "mad" mad
                                         "samples" (arr (mapcar (lambda (x) (field x "score")) results))
-                                        "metrics" (field (car (last results)) "metrics")
+                                        "metrics" aggregates "secondary_missing" missing
                                         "at" (timestamp))))
               (if score
                   (obj "score" score "mad" mad "samples" (length results) "next" "decide keep|discard --reason")
@@ -200,7 +234,7 @@
       (fail "candidate-pending" "Candidate already pending."
             "Run status --context; measure, decide, or recover it."))
     (clean-required root)
-    (let ((id (unique-id (1+ (field st "candidates")))))
+    (let ((id (unique-id (1+ (field st "candidates")) "c-")))
       (append-event root (obj "type" "begin" "id" id "head" (git-head root)
                                "hypothesis" hypothesis "scope" (field session "scope")
                                "protected" (field session "fingerprint") "at" (timestamp)))
@@ -210,8 +244,7 @@
   (let* ((score (real-field entry "score")) (best (field st "best"))
          (delta (and score (if (equal (field session "direction") "lower")
                                (- best score) (- score best)))))
-    (unless (and score (>= delta (max least-positive-double-float
-                                      (field session "tolerance"))))
+    (unless (and score (> delta (field session "tolerance")))
       (fail "not-improved" "Candidate has no passing score beyond absolute tolerance."
             "Run again or decide discard; failures never have score."))))
 
@@ -240,10 +273,12 @@
         (fail "source-drift" "Source changed since measurement."
               "Measure current source again, or manually resolve drift before discard."))
       (let ((intent (obj "type" "intent" "id" (field pending "id") "action" action
+                         "decision" (unique-id (1+ (field st "decisions")) "d-")
                          "reason" reason "source" source "head" (field pending "head")
                          "score" (if (equal action "keep") (field attempt "score") :null)
                          "at" (timestamp))))
         (append-event root intent)
+        (test-crash "after-intent")
         (apply-decision root session intent)))))
 
 (defun target-paths (intent)
@@ -254,13 +289,57 @@
     (unless (every (lambda (name) (member name paths :test #'equal)) staged)
       (fail "foreign-index" "Index contains paths not owned by this decision."
             "Inspect the index; recover will not reset foreign staged work." 5))
+    (dolist (name staged)
+      (let* ((expected (find name (coerce (field intent "source") 'list)
+                             :key (lambda (e) (field e "path")) :test #'equal))
+             (entry (first (nul-list (git root "ls-files" "-s" "-z" "--" name))))
+             (tab (and entry (position #\Tab entry)))
+             (parts (and tab (uiop:split-string (subseq entry 0 tab) :separator " ")))
+             (hash (and parts (second parts)))
+             (mode (and parts (first parts))))
+        (unless (and expected
+                     (equal hash (if (eq (field expected "hash") :null)
+                                     nil (field expected "hash")))
+                     (or (not mode)
+                         (equal mode (if (equal (field expected "mode") "executable")
+                                         "100755" "100644"))))
+          (fail "foreign-index" "Staged content differs from recorded candidate bytes."
+                "Inspect the index; recover will not unstage unrelated staged content." 5))))
     (when staged
       (apply #'git root (append (list "restore" "--staged" "--") staged)))))
+(defun tree-entry (root revision name)
+  (let* ((line (first (nul-list (git root "ls-tree" "-z" revision "--" name))))
+         (tab (and line (position #\Tab line))))
+    (when tab
+      (let ((parts (uiop:split-string (subseq line 0 tab) :separator " ")))
+        (when (equal (subseq line (1+ tab)) name)
+          (obj "mode" (first parts) "hash" (third parts)))))))
+(defun verify-committed (root intent)
+  (let* ((base (field intent "head"))
+         (paths (target-paths intent))
+         (committed (nul-list (git root "diff" "--name-only" "-z" base "HEAD"))))
+    (unless (equal (sort (copy-list committed) #'string<)
+                   (sort (copy-list paths) #'string<))
+      (fail "commit-drift" "Decision commit contains unexpected paths."
+            "Inspect the commit and journal before recover." 5))
+    (dolist (e (coerce (field intent "source") 'list))
+      (let* ((tree (tree-entry root "HEAD" (field e "path")))
+             (hash (field e "hash")) (mode (field e "mode")))
+        (unless (if (eq hash :null) (not tree)
+                    (and tree (equal hash (field tree "hash"))
+                         (equal (if (equal mode "executable") "100755" "100644")
+                                (field tree "mode"))))
+          (fail "commit-drift" "Committed content or mode differs from measurement."
+                "Inspect Git hook behavior and journal; no successful keep was recorded." 5))))
+    (unless (clean-p root)
+      (fail "commit-drift" "Working tree changed while committing."
+            "Inspect Git hook side effects before recover." 5))))
 (defun apply-decision (root session intent)
   (let* ((action (field intent "action")) (id (field intent "id"))
          (paths (target-paths intent)) (base (field intent "head"))
          (current (git-head root))
          (recovery (path root (format nil ".auto/recovery/~a/" id))))
+    (when (equal action "keep") (protected-required root session))
     (unless (or (equal current base)
                 (and (equal action "keep")
                      (equal base (trim (git root "rev-parse" "HEAD^")))
@@ -268,28 +347,41 @@
                              (git root "log" "-1" "--format=%s"))))
       (fail "ambiguous-recovery" "HEAD does not match decision intent or its expected commit."
             "Inspect Git and journal; do not reset automatically." 5))
+    (dolist (e (status-entries root))
+      (unless (member (cdr e) paths :test #'equal)
+        (fail "foreign-change" (format nil "Unowned change during recovery: ~a" (cdr e))
+              "Resolve foreign changes yourself before recover.")))
+    (when (and (equal action "discard")
+               (nul-list (git root "diff" "--cached" "--name-only" "-z")))
+      (fail "foreign-index" "Index changed during discard."
+            "Unstage foreign changes yourself before recover." 5))
     (if (equal action "keep")
-        (when (equal current base)
-          (unstage-owned root intent)
-          (let ((changes (scoped-changes root (coerce (field session "scope") 'list))))
-            (unless (and (equal (mapcar #'cdr changes) paths)
-                         (same-json (fingerprint root changes) (field intent "source")))
-              (fail "source-drift" "Source differs from recorded decision intent."
-                    "Restore measured changes before recover."))
-            (apply #'git root (append (list "add" "-A" "--") paths))
-            (handler-case
-                (git root "commit" "-m" (format nil "hillclimber candidate ~a: ~a" id (field intent "reason")))
-              (cli-error (e)
-                (when (equal (git-head root) base)
-                  (unstage-owned root intent)
-                  (append-event root (obj "type" "cancel-intent" "id" id
-                                          "at" (timestamp))))
-                (error e)))))
+        (progn
+          (when (equal current base)
+            (unstage-owned root intent)
+            (let ((changes (scoped-changes root (coerce (field session "scope") 'list))))
+              (unless (and (equal (mapcar #'cdr changes) paths)
+                           (same-json (fingerprint root changes) (field intent "source")))
+                (fail "source-drift" "Source differs from recorded decision intent."
+                      "Restore measured changes before recover."))
+              (apply #'git root (append (list "add" "-A" "--") paths))
+              (handler-case
+                  (git root "commit" "-m" (format nil "hillclimber candidate ~a: ~a" id (field intent "reason")))
+                (cli-error (e)
+                  (when (equal (git-head root) base)
+                    (unstage-owned root intent)
+                    (append-event root (obj "type" "cancel-intent" "id" id
+                                            "at" (timestamp))))
+                  (error e)))))
+          (test-crash "after-git")
+          (verify-committed root intent)
+          (protected-required root session))
         (progn
           (unless (equal current base)
             (fail "head-drift" "HEAD changed during discard."
                   "Restore original HEAD before recover." 5))
           (ensure-directories-exist recovery)
+          (sync-directory (path root ".auto/recovery/"))
           (dolist (e (coerce (field intent "source") 'list))
             (let* ((name (field e "path")) (file (path root name))
                    (dest (path recovery name)))
@@ -298,22 +390,45 @@
                     (when (and (probe-file file) (probe-file dest))
                       (fail "recovery-conflict" "Both source and recovery copy exist."
                             "Inspect recovery files before retrying." 5))
+                    (when (and (probe-file dest)
+                               (not (equal (hash-file dest) (field e "hash"))))
+                      (fail "recovery-conflict" "Recovered file differs from the recorded original."
+                            "Inspect recovery bytes; do not overwrite them." 5))
                     (when (probe-file file)
                       (unless (equal (hash-file file) (field e "hash"))
                         (fail "source-drift" "New file changed during discard."
                               "Inspect source and recovery before retrying."))
                       (ensure-directories-exist dest)
-                      (rename-file file dest)))
+                      (rename-file file dest)
+                      (sync-directory (uiop:pathname-directory-pathname dest))
+                      (sync-directory (uiop:pathname-directory-pathname file))
+                      (test-crash "after-discard-move")))
                   (progn
+                    (let* ((tree (tree-entry root base name))
+                           (now (and (probe-file file) (progn (file-mode file) (hash-file file))))
+                           (now-mode (and now (file-mode file)))
+                           (intent-hash (field e "hash")))
+                      (unless (or (and (equal now intent-hash)
+                                       (or (not now)
+                                           (equal now-mode (field e "mode"))))
+                                  (and tree (equal now (field tree "hash"))
+                                       (equal now-mode (if (equal (field tree "mode") "100755")
+                                                           "executable" "regular"))))
+                        (fail "source-drift" (format nil "Tracked file changed since discard intent: ~a" name)
+                              "Inspect source and recovery; recover refuses to overwrite new edits.")))
                     ;; Git restore is restricted to the exact recorded tracked path.
                     (git root "restore" "--source" base "--worktree" "--" name)))))))
+    (test-crash "after-files")
     (let ((st (state root)))
       (when (eq (field st "applied") :null)
-        (append-event root (obj "type" "applied" "id" id "action" action
+        (append-event root (obj "type" "applied" "id" id
+                                "decision" (field intent "decision") "action" action
                                 "head" (git-head root) "at" (timestamp)))))
+    (test-crash "after-applied")
     (let ((st (state root)))
       (unless (eq (field st "pending") :null)
-        (append-event root (obj "type" "resolved" "id" id "action" action
+        (append-event root (obj "type" "resolved" "id" id
+                                "decision" (field intent "decision") "action" action
                                 "head" (git-head root) "score" (field intent "score")
                                 "reason" (field intent "reason") "at" (timestamp)))))
     (obj "candidate" id "decision" action "head" (git-head root)
@@ -321,7 +436,25 @@
          "next" "begin --hypothesis")))
 
 (defun recover-session (root)
-  (let* ((session (load-session root)) (st (state root))
+  (let* ((session (load-session root))
+         (bytes (journal-bytes root))
+         (prefix (1+ (journal-prefix bytes))))
+    (validate-identity root session)
+    (when (< prefix (length bytes))
+      ;; Verify every complete record before touching recovery storage.
+      (journal root t)
+      (let ((backup (path root (format nil ".auto/recovery/journal-~d-~d.jsonl"
+                                       (timestamp) (length bytes)))))
+        (ensure-directories-exist backup)
+        (with-open-file (f backup :direction :output :if-exists :error
+                                  :element-type '(unsigned-byte 8))
+          (write-sequence bytes f) (sync-stream f))
+        (sync-directory (path root ".auto/recovery/"))
+        (with-open-file (f (events-file root) :direction :io :if-exists :overwrite
+                                            :element-type '(unsigned-byte 8))
+          (sb-posix:ftruncate (sb-sys:fd-stream-fd f) prefix)
+          (sync-stream f))))
+    (let* ((st (state root))
          (intent (field st "intent")) (attempt (field st "attempt")))
     (validate-identity root session)
     (cond
@@ -332,4 +465,4 @@
                                "score" :null "error" "Interrupted; execution budget consumed."
                                "at" (timestamp)))
        (obj "recovered" "interrupted attempt" "next" "run or decide discard"))
-      (t (obj "recovered" "nothing pending" "next" "status --context")))))
+      (t (obj "recovered" "nothing pending" "next" "status --context"))))))

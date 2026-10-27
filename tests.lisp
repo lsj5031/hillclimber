@@ -4,6 +4,8 @@
   (assert (null (decimal "NaN")))
   (assert (null (decimal "#x12")))
   (assert (null (decimal "1e9999")))
+  (assert (null (decimal "1e-400")))
+  (assert (= (decimal "0") 0d0))
   (assert (= (median '(1d0 5d0 3d0)) 3d0))
   (multiple-value-bind (parsed duplicates)
       (metrics (format nil "METRIC µs=-2e1~%METRIC µs=0~%"))

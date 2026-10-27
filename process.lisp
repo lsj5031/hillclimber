@@ -25,7 +25,8 @@
       (let ((power (- (* exp-sign exponent) fraction)))
         (handler-case
             (let ((value (coerce (* sign digits (expt 10 power)) 'double-float)))
-              (when (and (<= (abs value) most-positive-double-float)
+              (when (and (or (zerop digits) (not (zerop value)))
+                         (<= (abs value) most-positive-double-float)
                          (not (sb-ext:float-nan-p value))) value))
           (error () nil))))))
 
@@ -87,6 +88,8 @@
                   (sb-posix:close out-r) (sb-posix:close err-r)
                   (sb-posix:dup2 out-w 1) (sb-posix:dup2 err-w 2)
                   (sb-posix:close out-w) (sb-posix:close err-w)
+                  (let ((null-fd (sb-posix:open "/dev/null" sb-posix:o-rdonly 0)))
+                    (sb-posix:dup2 null-fd 0) (sb-posix:close null-fd))
                   (sb-posix:chdir root)
                   (let ((argv (sb-alien:make-alien sb-alien:c-string 3)))
                     (setf (sb-alien:deref argv 0) "/bin/sh"
