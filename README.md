@@ -18,7 +18,8 @@ python3 integration.py
 with ASDF and SBCL `--no-userinit --no-sysinit`. After dependencies are
 present, `sbcl --no-userinit --no-sysinit --non-interactive --load build.lisp`
 works offline. The native executable is `build/hillclimber`. Runtime requires
-Git and `/bin/sh`, but no Lisp initialization or dependency fetch.
+Git and `/bin/sh` plus the macOS image's Homebrew `libzstd.1.dylib`, but no
+Lisp initialization or dependency fetch.
 
 The executable's quickstart (run in a new disposable or dedicated worktree):
 

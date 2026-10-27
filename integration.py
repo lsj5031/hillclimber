@@ -232,6 +232,9 @@ class Integration(unittest.TestCase):
     def test_keep_crash_after_applied(self):
         self._check_crash_keep("after-applied")
 
+    def test_keep_crash_after_file_integrity(self):
+        self._check_crash_keep("after-files")
+
     def test_discard_crash_during_file_move(self):
         self.init()
         self.cli("run", "--baseline")
@@ -245,6 +248,31 @@ class Integration(unittest.TestCase):
         self.assertEqual((self.repo / ".auto/recovery/c-000001/src/new µ file").read_bytes(),
                          b"disposable bytes\n")
         self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def test_discard_crash_after_file_restore(self):
+        self.init()
+        self.cli("run", "--baseline")
+        self.begin()
+        (self.repo / "src/new µ file").write_bytes(b"saved\n")
+        self.cli("run")
+        self.crash("after-files", "decide", "discard", "--reason", "Crash fixture")
+        self.cli("recover")
+        self.assertEqual((self.repo / "src/value").read_text(), "slow\n")
+        self.assertEqual((self.repo / ".auto/recovery/c-000001/src/new µ file").read_bytes(),
+                         b"saved\n")
+        self.cli("recover")
+        self.assertIsNone(self.cli("status")["candidate"])
+
+    def test_discard_crash_after_applied(self):
+        self.init()
+        self.cli("run", "--baseline")
+        self.begin()
+        self.cli("run")
+        self.crash("after-applied", "decide", "discard", "--reason", "Crash fixture")
+        self.cli("recover")
+        self.assertEqual((self.repo / "src/value").read_text(), "slow\n")
+        self.cli("recover")
+        self.assertIsNone(self.cli("status")["candidate"])
 
     def test_recover_refuses_new_edits_after_discard_intent(self):
         self.init()
@@ -334,6 +362,21 @@ class Integration(unittest.TestCase):
             self.assertTrue(attempt["benchmark"][stream]["truncated"])
             self.assertEqual((self.repo / ".auto/runs/r-000001" /
                               ("benchmark." + stream)).stat().st_size, 65536)
+
+    def test_checks_timeout_reaps_descendant(self):
+        (self.repo / "checks.sh").write_text(
+            "#!/bin/sh\nsleep 60 &\necho $! > check-child.pid\nwait\n"
+        )
+        self.git("add", "checks.sh")
+        self.git("commit", "-qm", "Timeout check fixture")
+        self.init()
+        self.cli("run", "--baseline", "--timeout", "1", expected=4)
+        attempt = self.cli("status")["last_attempt"]
+        self.assertTrue(attempt["checks"]["timeout"])
+        self.assertIsNone(attempt["score"])
+        child = int((self.repo / "check-child.pid").read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child, 0)
 
     def test_repeat_median_mad_and_secondary_missing(self):
         (self.repo / "bench.sh").write_text(

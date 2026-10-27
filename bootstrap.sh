@@ -2,6 +2,10 @@
 set -eu
 cd "$(dirname "$0")"
 mkdir -p .deps build scratch
+[ "$(sbcl --version)" = "SBCL 2.6.9" ] || {
+  echo "Build requires pinned SBCL 2.6.9" >&2
+  exit 1
+}
 fetch() {
   name=$1 url=$2 revision=$3
   if [ ! -d ".deps/$name/.git" ]; then

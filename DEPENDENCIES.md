@@ -11,10 +11,14 @@ exact revisions. `build.lisp` uses only those paths. Verify with
 | [yason](https://github.com/phmarek/yason) | `ea16bc5c5ad099322bffc77686f6e9a67e68a6c1` | BSD-style, see `.deps/yason/LICENSE` |
 | [alexandria](https://gitlab.common-lisp.net/alexandria/alexandria) | `f283e25efbe9f4323419a138b22ad2fc027f6641` | public domain / 0-clause MIT fallback, `.deps/alexandria/LICENCE` |
 | [trivial-gray-streams](https://github.com/trivial-gray-streams/trivial-gray-streams) | `257d73ec36958beb7d49eba5567d5409827197b7` | MIT, `.deps/trivial-gray-streams/COPYING` |
+| zstd shared library (macOS image) | Homebrew `libzstd.1.dylib` 1.5.7 | BSD option, `/opt/homebrew/opt/zstd/LICENSE` |
 
 Yason depends on Alexandria and trivial-gray-streams. No clingon: its
 transitive dependency surface is disproportionate to six commands, so the CLI
 uses a small explicit option table. Git and `/bin/sh` are runtime requirements.
+The macOS binary also dynamically links Homebrew's `libzstd.1.dylib` and
+macOS `libSystem.B.dylib`, as verified with `otool -L`; it is not a single
+portable binary for Macs lacking the matching zstd library.
 The executable contains the pinned Lisp library code; retain the dependency
 license texts alongside redistributed binaries. The behavior is a fresh
 implementation, not a translation of upstream TypeScript; workflow inspiration:
