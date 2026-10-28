@@ -157,3 +157,27 @@
   workflow safety search and negative models were not rerun; prior section
   records their existing finite-state results. Model files are unchanged.
 - This preparation does not change repository visibility or publish binaries.
+
+## 9. Core resource and journal regressions (2026-10-28)
+
+- `run-cmd` now owns its subprocess and drain threads through `unwind-protect`,
+  closes process streams after draining, and propagates reader errors on the
+  caller thread after cleanup. New ASDF assertions check bounded descriptors
+  across repeated nonzero exits with stdout/stderr, output-limit failure and
+  an injected reader failure. `python3 core_integration.py` adds the reproduced
+  100-new-file candidate under a child-local descriptor limit of 128.
+- Complete v1 records are checked for required shapes/finite values and legal
+  replay transitions before state is returned or an incomplete tail is trimmed.
+  Candidate/run/decision identities, sample/source evidence and paired
+  intent/applied/resolved records must agree. Corruption blocks mutation without
+  rewriting journal bytes or creating a tail-repair backup. Valid incomplete
+  prefixes, sparse interrupted-attempt recovery, retry without recovery, hook
+  cancellation and repeated decision recovery retain their existing behavior.
+- Both original defect regressions failed on the unchanged implementation.
+  After the fixes, the new focused suite passed four tests (including malformed
+  record/transition subcases with and without incomplete tails), ASDF assertions
+  passed, and the existing full integration suite passed 35 tests in 78.949s.
+  This is macOS/SBCL process-level verification, not power-loss or cross-platform
+  verification. Journal checks are consistency checks, not cryptographic
+  authentication of arbitrary, self-consistent edits. No new dependency, journal
+  version, writer format or automatic migration is introduced.
