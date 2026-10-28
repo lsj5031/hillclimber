@@ -51,7 +51,14 @@
          (direction (option options "--direction"))
          (unit (option options "--unit" "unit"))
          (budget (int-option (option options "--max-runs") "--max-runs"))
-         (tolerance (or (decimal (option options "--tolerance" "0")) -1)))
+         (tolerance (or (decimal (option options "--tolerance" "0")) -1))
+         (branch (multiple-value-bind (output status)
+                     (run-cmd "/usr/bin/git"
+                              (list "-C" root "symbolic-ref" "--quiet" "--short" "HEAD"))
+                   (unless (zerop status)
+                     (fail "detached-head" "init requires an attached branch."
+                           "Create or check out a branch, then retry init."))
+                   (trim output))))
     (unless (and name (plusp (length name)) metric (metric-name-p metric)
                  (member direction '("lower" "higher") :test #'equal)
                  (>= tolerance 0) benchmark scope
@@ -92,7 +99,7 @@
              (session (obj "v" 1 "name" name "metric" metric "direction" direction "unit" unit
                            "budget" budget "tolerance" tolerance
                            "scope" (arr scope) "protected" (arr protected)
-                           "root" root "branch" (trim (git root "symbolic-ref" "--quiet" "--short" "HEAD"))
+                           "root" root "branch" branch
                            "git-dir" (trim (git root "rev-parse" "--git-dir")))))
         (setf (gethash "fingerprint" session) (protected-fingerprint root session))
         (write-json-file (session-file root) session)
@@ -264,8 +271,11 @@
            (source (fingerprint root entries)))
       (when (equal action "keep")
         (unless (and (hash-table-p attempt)
+                     (equal (field attempt "type") "aggregate")
+                     (equal (field attempt "candidate") (field pending "id"))
+                     (equal (field pending "head") (field st "accepted"))
                      (same-json source (field attempt "source")))
-          (fail "source-drift" "Source changed since the passing measurement."
+          (fail "source-drift" "Keep requires a completed aggregate for this candidate and unchanged source/HEAD."
                 "Run again before keep, or discard."))
         (valid-keep session st attempt)
         (unless entries (fail "no-changes" "No candidate changes to keep." "Edit the scope and run again.")))
@@ -408,10 +418,10 @@
                     (let* ((tree (tree-entry root base name))
                            (now (and (probe-file file) (progn (file-mode file) (hash-file file))))
                            (now-mode (and now (file-mode file)))
-                           (intent-hash (field e "hash")))
+                           (intent-hash (unless (eq (field e "hash") :null)
+                                          (field e "hash"))))
                       (unless (or (and (equal now intent-hash)
-                                       (or (not now)
-                                           (equal now-mode (field e "mode"))))
+                                       (equal (or now-mode "deleted") (field e "mode")))
                                   (and tree (equal now (field tree "hash"))
                                        (equal now-mode (if (equal (field tree "mode") "100755")
                                                            "executable" "regular"))))

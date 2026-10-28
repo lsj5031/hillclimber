@@ -55,6 +55,7 @@ hillclimber status --context --json
 ```
 
 The six commands are `init`, `begin`, `run`, `decide`, `status`, `recover`.
+`init` requires a clean, committed worktree on an attached branch.
 Use `--project PATH` to target an exact worktree root and `--json` for
 versioned, machine-readable stdout. Run `status --context --json` to resume.
 All tests create disposable repositories under `scratch/`; they do not touch
