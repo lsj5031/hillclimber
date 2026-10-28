@@ -45,8 +45,10 @@ Use status --context --json to discover state; never guess or reinitialize.
 versioned object on stdout, including help/errors; no interactive prompts.
 Malformed option tokens fail first; otherwise --help wins over --version and
 both precede repository/state checks. Help and version never mutate files.
+Recognized option tokens cannot be values; prefix flag-named paths with ./.
+Negative numbers and unrecognized flag-looking text remain valid values.
 Exit: 0 success/help; 2 arguments; 3 precondition; 4 failed measurement;
-5 Git/storage/internal; 130 interrupt. See COMMAND --help for exact options.
+5 Git/storage/internal; 130 interrupt; 143 SIGTERM. See COMMAND --help for exact options.
 ")
 (defparameter *help*
   (list
@@ -102,6 +104,12 @@ Exit: 0, 3 precondition/drift, 5 ambiguous Git/storage.")))
               *common*)
       (format nil "~a~a~%Commands: init, run, begin, decide, status, recover.~%~%~a"
               *intro* *quickstart* *common*)))
+(defparameter *value-options*
+  '("--project" "--name" "--metric" "--direction" "--scope" "--max-runs"
+    "--benchmark" "--check" "--input" "--unit" "--tolerance" "--repeat"
+    "--timeout" "--hypothesis" "--reason" "--history"))
+(defparameter *flag-options*
+  '("--help" "--json" "--version" "--baseline" "--context"))
 (defun parse-args (args)
   (let ((positionals nil) (options nil) (flag-help nil) (flag-json nil) (flag-version nil)
         (project nil))
@@ -110,18 +118,17 @@ Exit: 0, 3 precondition/drift, 5 ambiguous Git/storage.")))
                ((equal word "--help") (setf flag-help t))
                ((equal word "--json") (setf flag-json t))
                ((equal word "--version") (setf flag-version t))
-               ((equal word "--project")
-                (unless args (fail "arguments" "--project requires PATH." "See --help." 2))
-                (setf project (pop args)))
                ((member word '("--baseline" "--context") :test #'equal)
                 (push (cons word t) options))
-               ((member word '("--name" "--metric" "--direction" "--scope"
-                               "--max-runs" "--benchmark" "--check" "--input"
-                               "--unit" "--tolerance" "--repeat" "--timeout"
-                               "--hypothesis" "--reason" "--history") :test #'equal)
-                (unless args (fail "arguments" (format nil "~a requires a value." word)
-                                   "See COMMAND --help." 2))
-                (push (cons word (pop args)) options))
+               ((member word *value-options* :test #'equal)
+                (when (or (null args)
+                          (member (first args) *value-options* :test #'equal)
+                          (member (first args) *flag-options* :test #'equal))
+                  (fail "arguments" (format nil "~a requires a value." word)
+                        "See COMMAND --help; option tokens cannot be values." 2))
+                (if (equal word "--project")
+                    (setf project (pop args))
+                    (push (cons word (pop args)) options)))
                ((and (plusp (length word)) (char= (char word 0) #\-))
                 (fail "arguments" (format nil "Unknown option ~a." word) "See --help." 2))
                (t (push word positionals))))
@@ -226,6 +233,12 @@ Exit: 0, 3 precondition/drift, 5 ambiguous Git/storage.")))
   (let ((json-mode (member "--json" (uiop:command-line-arguments) :test #'equal))
         (exit-code 0))
     (catch 'user-interrupt
+      (sb-sys:enable-interrupt
+       sb-posix:sigterm
+       (lambda (signal info context)
+         (declare (ignore signal info context))
+         (setf exit-code 143)
+         (throw 'user-interrupt nil)))
       (handler-bind ((sb-sys:interactive-interrupt
                        (lambda (e) (declare (ignore e))
                          (setf exit-code 130)
@@ -259,13 +272,15 @@ Exit: 0, 3 precondition/drift, 5 ambiguous Git/storage.")))
                                                     "message" (princ-to-string e)
                                                     "next" "Inspect the session and run recover if a decision is pending."))))
             (format *error-output* "internal: ~a~%" e))))))
-    (when (= exit-code 130)
-      (let ((payload (obj "code" "interrupted"
-                          "message" "Interrupted; any started execution consumed budget."
+    (when (member exit-code '(130 143))
+      (let ((payload (obj "code" (if (= exit-code 143) "terminated" "interrupted")
+                          "message" (if (= exit-code 143)
+                                        "Terminated by SIGTERM; any started execution consumed budget."
+                                        "Interrupted; any started execution consumed budget.")
                           "next" "Run recover, then inspect status and logs.")))
         (if json-mode
             (write-line (json (response "error" payload)))
-            (format *error-output* "interrupted: ~a~%Next: ~a~%"
-                    (field payload "message") (field payload "next")))))
+            (format *error-output* "~a: ~a~%Next: ~a~%"
+                    (field payload "code") (field payload "message") (field payload "next")))))
     (finish-output) (finish-output *error-output*)
     (sb-ext:exit :code exit-code)))

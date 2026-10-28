@@ -1,5 +1,19 @@
 (in-package :hillclimber)
+(defun test-astra-median ()
+  (dolist (value (list most-positive-double-float most-negative-double-float
+                       least-positive-double-float least-negative-double-float
+                       1d308 -1d308 0d0 -0d0))
+    (assert (eql (median (list value value)) value)))
+  (assert (= (median (list most-negative-double-float most-positive-double-float)) 0d0))
+  (assert (= (median (list least-positive-double-float
+                          (* 3 least-positive-double-float)))
+             (* 2 least-positive-double-float)))
+  (assert (= (median '(1d308 1.6d308)) 1.3d308))
+  (assert (= (median '(-1.6d308 -1d308)) -1.3d308))
+  (assert (= (median '(-8d0 -2d0 4d0 10d0)) 1d0))
+  (format *error-output* "Astra median assertions passed.~%"))
 (defun test-core ()
+  (test-astra-median)
   (assert (= (decimal "-1.25e2") -125d0))
   (assert (null (decimal "NaN")))
   (assert (null (decimal "#x12")))

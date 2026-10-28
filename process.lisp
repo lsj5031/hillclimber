@@ -49,7 +49,12 @@
 
 (defun median (samples)
   (let* ((v (sort (copy-list samples) #'<)) (n (length v)) (mid (floor n 2)))
-    (if (oddp n) (nth mid v) (/ (+ (nth (1- mid) v) (nth mid v)) 2d0))))
+    (if (oddp n) (nth mid v)
+        ;; Average exactly before rounding, avoiding overflow and loss of
+        ;; subnormal halves even when both finite endpoints are extreme.
+        (let ((a (nth (1- mid) v)) (b (nth mid v)))
+          (if (eql a b) a
+              (coerce (/ (+ (rational a) (rational b)) 2) 'double-float))))))
 
 (defun capture-fd (fd file)
   (let ((seen 0) (saved 0) (limit 65536)
@@ -101,7 +106,7 @@
           (sb-posix:close out-w) (sb-posix:close err-w)
           (let* ((a (sb-thread:make-thread (lambda () (capture-fd out-r out-file)) :name "stdout-drain"))
                  (b (sb-thread:make-thread (lambda () (capture-fd err-r err-file)) :name "stderr-drain"))
-                 (status nil) (timed-out nil))
+                 (status nil) (timed-out nil) (stdout nil) (stderr nil))
             (unwind-protect
                  (progn
                    (loop
@@ -119,12 +124,16 @@
               ;; Reap descendants still in the group before joining readers.
               (ignore-errors (sb-posix:kill (- pid) sb-posix:sigterm))
               (sleep 0.02)
-              (ignore-errors (sb-posix:kill (- pid) sb-posix:sigkill)))
-            (let ((stdout (sb-thread:join-thread a)) (stderr (sb-thread:join-thread b)))
-              (obj "exit" (if (and status (sb-posix:wifexited status))
+              (ignore-errors (sb-posix:kill (- pid) sb-posix:sigkill))
+              (unless status
+                (multiple-value-bind (found code) (sb-posix:waitpid pid 0)
+                  (declare (ignore found)) (setf status code)))
+              (setf stdout (sb-thread:join-thread a)
+                    stderr (sb-thread:join-thread b)))
+            (obj "exit" (if (and status (sb-posix:wifexited status))
                               (sb-posix:wexitstatus status) :null)
                    "timeout" (bool timed-out)
                    "seconds" (- (monotime) start)
                    "stdout" stdout "stderr" stderr
                    "stdout_tail" (let ((s (log-text out-file))) (subseq s (max 0 (- (length s) 2048))))
-                   "stderr_tail" (let ((s (log-text err-file))) (subseq s (max 0 (- (length s) 2048))))))))))))
+                   "stderr_tail" (let ((s (log-text err-file))) (subseq s (max 0 (- (length s) 2048)))))))))))
