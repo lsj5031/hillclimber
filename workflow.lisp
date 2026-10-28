@@ -133,9 +133,20 @@
             (if (every #'numberp values)
                 (setf (gethash name aggregates) (median values))
                 (push name missing))))
-        (values (median scores)
-                (median (mapcar (lambda (s) (abs (- s (median scores)))) scores))
-                aggregates (arr (nreverse missing)))))))
+        (let* ((score (median scores))
+               ;; An outlier distance can exceed double range even when MAD
+               ;; is finite. Keep distances exact until the final median.
+               (mad (handler-case
+                        (coerce (median (mapcar (lambda (s)
+                                                 (abs (- (rational s) (rational score))))
+                                               scores))
+                                'double-float)
+                      (floating-point-overflow () nil))))
+          (unless (and mad (not (sb-ext:float-nan-p mad))
+                       (<= (abs mad) most-positive-double-float))
+            (fail "aggregate-range" "Median absolute deviation exceeds finite double range."
+                  "Inspect sample spread and rerun; no completed aggregate was recorded." 4))
+          (values score mad aggregates (arr (nreverse missing))))))))
 (defun test-crash (point)
   ;; Deterministic process-crash injection for disposable integration fixtures.
   (when (equal (uiop:getenv "HILLCLIMBER_TEST_CRASH") point)
@@ -250,8 +261,9 @@
 (defun valid-keep (session st entry)
   (let* ((score (real-field entry "score")) (best (field st "best"))
          (delta (and score (if (equal (field session "direction") "lower")
-                               (- best score) (- score best)))))
-    (unless (and score (> delta (field session "tolerance")))
+                               (- (rational best) (rational score))
+                               (- (rational score) (rational best))))))
+    (unless (and score (> delta (rational (field session "tolerance"))))
       (fail "not-improved" "Candidate has no passing score beyond absolute tolerance."
             "Run again or decide discard; failures never have score."))))
 
