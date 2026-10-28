@@ -47,14 +47,17 @@
             (setf (gethash name result) (decimal (subseq body (1+ eq))))))))
     (values result (arr (nreverse duplicates)))))
 
-(defun median (samples)
+(defun median (samples &optional legacy)
   (let* ((v (sort (copy-list samples) #'<)) (n (length v)) (mid (floor n 2)))
     (if (oddp n) (nth mid v)
         ;; Average exactly before rounding, avoiding overflow and loss of
         ;; subnormal halves even when both finite endpoints are extreme.
         (let ((a (nth (1- mid) v)) (b (nth mid v)))
-          (if (eql a b) a
-              (coerce (/ (+ (rational a) (rational b)) 2) 'double-float))))))
+          ;; Legacy arithmetic is used only to validate already-written v1
+          ;; evidence; new measurements always use the exact midpoint.
+          (if legacy (coerce (/ (+ a b) 2) 'double-float)
+              (if (eql a b) a
+                  (coerce (/ (+ (rational a) (rational b)) 2) 'double-float)))))))
 
 (defun capture-fd (fd file)
   (let ((seen 0) (saved 0) (limit 65536)

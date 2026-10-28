@@ -120,7 +120,7 @@
                (eq (field state "intent") :null))
       (fail "head-drift" "HEAD changed outside hillclimber."
             "Return to accepted HEAD without losing your work, or inspect recover."))))
-(defun score-samples (results)
+(defun score-samples (results &optional legacy)
   (let ((scores (mapcar (lambda (e) (real-field e "score")) results)))
     (when (and (= (length scores) (length results)) (every #'numberp scores))
       (let* ((names (remove-duplicates
@@ -131,15 +131,16 @@
         (dolist (name names)
           (let ((values (mapcar (lambda (r) (real-field (field r "metrics") name)) results)))
             (if (every #'numberp values)
-                (setf (gethash name aggregates) (median values))
+                (setf (gethash name aggregates) (median values legacy))
                 (push name missing))))
-        (let* ((score (median scores))
+        (let* ((score (median scores legacy))
                ;; An outlier distance can exceed double range even when MAD
                ;; is finite. Keep distances exact until the final median.
                (mad (handler-case
                         (coerce (median (mapcar (lambda (s)
-                                                 (abs (- (rational s) (rational score))))
-                                               scores))
+                                                 (abs (if legacy (- s score)
+                                                          (- (rational s) (rational score)))))
+                                               scores) legacy)
                                 'double-float)
                       (floating-point-overflow () nil))))
           (unless (and mad (not (sb-ext:float-nan-p mad))
